@@ -15,8 +15,8 @@
 1. 克隆仓库：
 
    ```bash
-   git clone https://github.com/yourusername/langchain-weather-agent.git
-   cd langchain-weather-agent
+   git clone https://github.com/Wuzhizhu22/MyLCAgent.git
+   cd MyLCAgent
    ```
 
 2. 安装依赖：
