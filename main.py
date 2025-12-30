@@ -1,36 +1,33 @@
 import yaml
 import argparse
-
-from langchain.agents import create_agent
-from langchain.tools import tool, ToolRuntime
-from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.config import get_stream_writer
-from langchain_core.callbacks import UsageMetadataCallbackHandler
-from langchain.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
-
 from dataclasses import dataclass
 from pydantic import BaseModel, Field, field_validator
 
+from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain.tools import tool, ToolRuntime
+from langchain_core.callbacks import UsageMetadataCallbackHandler
+from langchain.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_stream_writer
+
+# --- 配置与常量 ---
 SYSTEM_MESSAGE = SystemMessage(
     content="""你是一位专业的天气预报员，说话时喜欢用双关语。
-
-如果用户向你询问天气，确保你知道位置。如果从问题中可以看出他们指的是他们所在的位置，请先获取用户位置，然后查询天气。""",
+    如果用户询问天气，请确保知道位置。若指代当前位置，请先获取位置再查询。
+    请严格按照 ReAct 格式输出：<question>, <thought>, <action>, <observation>, <final_answer>。""",
     id="system_001",
 )
 
 
 @dataclass
 class Context:
-    """自定义运行时上下文模式。"""
-
     user_id: str
 
 
 class WeatherQuery(BaseModel):
-    """天气查询参数（使用Pydantic）"""
-
-    city: str = Field(description="城市名称或地区，例如：北京、上海、纽约、佛罗里达")
+    city: str = Field(description="城市名称")
 
     @field_validator("city")
     def city_must_not_be_empty(cls, v):
@@ -39,6 +36,16 @@ class WeatherQuery(BaseModel):
         return v.strip()
 
 
+@dataclass
+class ResponseFormat:
+    question: str
+    thought: str
+    action: str
+    observation: str
+    final_answer: str
+
+
+# --- 工具定义 ---
 @tool(
     "get_weather_for_location",
     description="获取指定城市的天气信息。当用户询问天气或需要天气数据时使用此工具，返回指定城市的当前天气状况。",
@@ -46,9 +53,9 @@ class WeatherQuery(BaseModel):
 def get_weather_for_location(query: WeatherQuery) -> str:
     """获取指定城市的天气信息"""
     writer = get_stream_writer()
-    writer(f"🔍 正在查询城市: {query.city}")
-    writer(f"📊 获取到城市数据: {query.city}")
-    return f"{query.city}总是阳光明媚！"
+    city = query.city.strip()
+    writer(f"🔍 正在查询: {city}")
+    return f"{city}总是阳光明媚，真是‘晴’深似海！"
 
 
 @tool(
@@ -56,156 +63,149 @@ def get_weather_for_location(query: WeatherQuery) -> str:
     description="根据用户ID获取用户位置信息。当需要知道用户位置时使用此工具，根据运行时上下文中的用户ID返回对应的位置信息。",
 )
 def get_user_location(runtime: ToolRuntime[Context]) -> str:
-    """根据用户ID获取用户位置信息"""
+    """获取用户位置"""
     writer = get_stream_writer()
-    user_id = runtime.context.user_id
-    writer(f"👤 正在查找用户ID: {user_id}")
-    location = "佛罗里达" if user_id == "1" else "旧金山"
-    writer(f"📍 找到用户位置: {location}")
+    location = "佛罗里达" if runtime.context.user_id == "1" else "旧金山"
+    writer(f"📍 找到位置: {location}")
     return location
 
 
-@dataclass
-class ResponseFormat:
-    """响应格式：包含双关语回答和可选的天气状况"""
+# --- 打印辅助函数 (合并简化) ---
+def print_react_step(step_type: str, content: str, tool_args: dict = None) -> None:
+    """统一的 ReAct 步骤打印函数"""
+    styles = {
+        "question": ("❓", "Question"),
+        "thought": ("💭", "Thought"),
+        "action": ("🔧", "Action"),
+        "observation": ("🔍", "Observation"),
+        "final_answer": ("✅", "Final Answer"),
+    }
+    icon, label = styles.get(step_type.lower(), ("📄", step_type.title()))
 
-    punny_response: str
-    weather_conditions: str | None = None
+    # 解码 Unicode 转义序列
+    if content and "\\u" in content:
+        try:
+            content = content.encode("utf-8").decode("unicode_escape")
+        except:
+            pass  # 如果解码失败，保持原样
 
-    def __str__(self):
-        result = f"回答：{self.punny_response}"
-        if self.weather_conditions:
-            result += f"\n天气状况：{self.weather_conditions}"
-        return result
-
-
-def load_config(config_path):
-    """从YAML文件加载配置"""
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def create_human_message(content: str, user_id: str = None) -> HumanMessage:
-    """创建带元数据的人类消息"""
-    return HumanMessage(content=content, name=f"user_{user_id}" if user_id else "user")
-
-
-def process_message_blocks(message: AIMessage) -> dict:
-    """处理 AIMessage 的 content_blocks，提取不同类型的内容"""
-    result = {"tool_calls": [], "text_content": [], "reasoning": None}
-
-    content_blocks = message.content_blocks
-
-    if content_blocks:
-        for block in content_blocks:
-            block_type = block.get("type")
-
-            if block_type == "tool_call":
-                result["tool_calls"].append(
-                    {"name": block.get("name"), "args": block.get("args"), "id": block.get("id")}
-                )
-            elif block_type == "text":
-                result["text_content"].append(block.get("text"))
-            elif block_type == "reasoning":
-                result["reasoning"] = block.get("summary", [])
-
-    return result
+    if step_type == "action" and tool_args:
+        args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
+        print(f"\n{icon} {label}: {content}({args_str})")
+    else:
+        print(f"\n{icon} {label}: {content}")
 
 
-tool_config = load_config("./llm.yaml")
-model = ChatOpenAI(**tool_config["llm"])
+def print_token_usage(callback: UsageMetadataCallbackHandler) -> None:
+    """统计 Token 使用"""
+    print(f"\n📊 Token 统计:")
+    for model, meta in (callback.usage_metadata or {}).items():
+        print(
+            f"   {model} -> In: {meta.get('input_tokens')} | Out: {meta.get('output_tokens')} | Total: {meta.get('total_tokens')}"
+        )
 
 
+# --- 核心逻辑解析器 ---
+def dispatch_react_elements(message):
+    """解析消息内容并分发给打印函数"""
+    if isinstance(message, ToolMessage):
+        if not message.content.startswith("Returning structured response"):
+            print_react_step("observation", message.content)
+        return
+
+    if not isinstance(message, AIMessage):
+        return
+
+    # 处理思维链或结构化工具调用
+    if hasattr(message, "content_blocks") and message.content_blocks:
+        for block in message.content_blocks:
+            b_type = block.get("type")
+            if b_type == "reasoning":
+                summary = " ".join([item.get("text", "") for item in block.get("summary", [])])
+                print_react_step("thought", summary)
+            elif b_type == "tool_call":
+                if block.get("name") == "ResponseFormat":
+                    args = block.get("args", {})
+                    for field in ["question", "thought", "final_answer"]:
+                        if args.get(field):
+                            print_react_step(field, args[field])
+                else:
+                    print_react_step("action", block.get("name"), block.get("args"))
+            elif b_type == "text" and block.get("text"):
+                print_react_step("info", block["text"])
+
+
+# --- 执行模式 ---
+def run_agent(agent, user_input, config, context, mode="invoke"):
+    print(f"\n🤔 智能体正在思考 ({mode})...\n")
+    user_msg = HumanMessage(content=user_input, name=f"user_{context.user_id}")
+
+    if mode == "stream":
+        for stream_mode, chunk in agent.stream(
+            {"messages": [user_msg]}, stream_mode=["updates", "custom"], config=config, context=context
+        ):
+            if stream_mode == "custom":
+                print(f"🎯 {chunk}")
+            elif stream_mode == "updates":
+                for data in chunk.values():
+                    if not data:
+                        continue
+                    if "structured_response" in data:
+                        sr = data["structured_response"]
+                        for f in ["question", "thought", "final_answer"]:
+                            if hasattr(sr, f):
+                                print_react_step(f, getattr(sr, f))
+                    else:
+                        for m in data.get("messages", []):
+                            dispatch_react_elements(m)
+    else:
+        result = agent.invoke({"messages": [user_msg]}, config=config, context=context)
+        for m in result.get("messages", []):
+            dispatch_react_elements(m)
+
+
+# --- 主程序 ---
 def main():
-    parser = argparse.ArgumentParser(description="天气查询智能体")
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["stream", "invoke"],
-        default="invoke",
-        help="运行模式：stream（流式输出）或 invoke（一次性输出）",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--conversation", action="store_true")
+    parser.add_argument("--output-mode", choices=["stream", "invoke"], default="invoke")
+    parser.add_argument("--show-tokens", action="store_true")
     args = parser.parse_args()
 
-    checkpointer = InMemorySaver()
+    with open("./llm.yaml", "r") as f:
+        llm_config = yaml.safe_load(f)
+
+    model = ChatOpenAI(**llm_config["llm"])
     agent = create_agent(
         model=model,
         system_prompt=SYSTEM_MESSAGE.content,
         tools=[get_user_location, get_weather_for_location],
         context_schema=Context,
         response_format=ResponseFormat,
-        checkpointer=checkpointer,
+        checkpointer=InMemorySaver(),
+        middleware=[SummarizationMiddleware(model=model, trigger=("tokens", 40000), keep=("messages", 20))],
     )
 
-    callback = UsageMetadataCallbackHandler()
-    config_with_callback = {"configurable": {"thread_id": "1"}, "callbacks": [callback]}
+    token_cb = UsageMetadataCallbackHandler()
+    config = {"configurable": {"thread_id": "1"}, "callbacks": [token_cb]}
+    ctx = Context(user_id="1")
 
-    user_message = create_human_message("天气如何呢?", user_id="1")
-
-    if args.mode == "stream":
-        print("=== 开始流式输出 ===\n")
-
-        for stream_mode, chunk in agent.stream(
-            {"messages": [user_message]},
-            stream_mode=["updates", "custom"],
-            config=config_with_callback,
-            context=Context(user_id="1"),
-        ):
-            print(f"📡 流模式: {stream_mode}")
-
-            if stream_mode == "custom":
-                print(f"  🎯 {chunk}")
-            elif stream_mode == "updates":
-                for step, data in chunk.items():
-                    print(f"📍 步骤: {step}")
-
-                    messages = data.get("messages", [])
-                    if messages:
-                        last_message = messages[-1]
-
-                        if isinstance(last_message, AIMessage):
-                            blocks = process_message_blocks(last_message)
-
-                            for tool_call in blocks["tool_calls"]:
-                                print(f"  🛠️  调用工具: {tool_call['name']}")
-                                print(f"  📝 参数: {tool_call['args']}")
-
-                            for text in blocks["text_content"]:
-                                print(f"  💬 内容: {text}")
-
-                            if blocks["reasoning"]:
-                                print(f"  🧠 推理过程:")
-                                for summary in blocks["reasoning"]:
-                                    print(f"    - {summary.get('text', '')}")
-                        else:
-                            print(f"  📄 消息类型: {type(last_message).__name__}")
-                            print(f"  📄 消息内容: {last_message.content}")
-
-                    print()
-
-        print("\n=== 流式输出完成 ===")
+    if args.conversation:
+        print("💡 输入 'exit' 退出对话")
+        while True:
+            inp = input("\n👤 用户: ").strip()
+            if inp.lower() in ["exit", "quit", "退出"]:
+                break
+            if not inp:
+                continue
+            run_agent(agent, inp, config, ctx, args.output_mode)
+            if args.show_tokens:
+                print_token_usage(token_cb)
     else:
-        print("=== 使用 invoke 模式 ===\n")
-
-        result = agent.invoke(
-            {"messages": [user_message]},
-            config=config_with_callback,
-            context=Context(user_id="1"),
-        )
-
-        print(result["structured_response"])
-        print("\n=== invoke 完成 ===")
-
-    print("\n📊 Token 使用统计:")
-    if callback.usage_metadata:
-        for model_name, metadata in callback.usage_metadata.items():
-            print(f"  模型: {model_name}")
-            print(f"    输入 Tokens: {metadata.get('input_tokens', 0)}")
-            print(f"    输出 Tokens: {metadata.get('output_tokens', 0)}")
-            print(f"    总计 Tokens: {metadata.get('total_tokens', 0)}")
-    else:
-        print("  未获取到 token 使用统计")
-        print(f"  完整 metadata: {callback.usage_metadata}")
+        inp = input("👤 请输入问题: ").strip() or "天气如何呢?"
+        run_agent(agent, inp, config, ctx, args.output_mode)
+        if args.show_tokens:
+            print_token_usage(token_cb)
 
 
 if __name__ == "__main__":
