@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 
+temp
 tools.yaml
 # Virtual environments
 .venv

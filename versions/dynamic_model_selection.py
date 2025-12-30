@@ -4,7 +4,8 @@ from langchain.agents import create_agent
 from langchain.tools import tool, ToolRuntime
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.config import get_stream_writer
+from langchain.agents.middleware import wrap_model_call, ModelRequest, ModelResponse
+
 
 from dataclasses import dataclass
 
@@ -28,21 +29,14 @@ class Context:
 @tool
 def get_weather_for_location(city: str) -> str:
     """获取给定城市的天气。"""
-    writer = get_stream_writer()
-    writer(f"🔍 正在查询城市: {city}")
-    writer(f"📊 获取到城市数据: {city}")
     return f"{city}总是阳光明媚！"
 
 
 @tool
 def get_user_location(runtime: ToolRuntime[Context]) -> str:
     """根据用户ID检索用户信息。"""
-    writer = get_stream_writer()
     user_id = runtime.context.user_id
-    writer(f"👤 正在查找用户ID: {user_id}")
-    location = "佛罗里达" if user_id == "1" else "旧金山"
-    writer(f"📍 找到用户位置: {location}")
-    return location
+    return "佛罗里达" if user_id == "1" else "旧金山"
 
 
 # 定义响应模式
@@ -66,59 +60,48 @@ def load_config(config_path):
 
 
 tool_config = load_config("./tools.yaml")  # 加载配置
-model = ChatOpenAI(**tool_config["llm"])  # 创建模型实例
+basic_model = ChatOpenAI(**tool_config["llm"])  # 创建模型实例
+advance_model = ChatOpenAI(**tool_config["advance_llm"])  # 创建高级模型实例
+
+
+@wrap_model_call
+def dynamic_model_selection(request: ModelRequest, handler) -> ModelResponse:
+    """Choose model based on conversation complexity."""
+    message_count = len(request.state["messages"])
+
+    if message_count > 10:
+        # Use an advanced model for longer conversations
+        model = advanced_model
+    else:
+        model = basic_model
+
+    return handler(request.override(model=model))
 
 
 def main():
     checkpointer = InMemorySaver()  # 创建内存检查点保存器
     agent = create_agent(  # 创建智能体
-        model=model,  # 传入模型
+        model=basic_model,  # 传入模型
         system_prompt=SYSTEM_PROMPT,  # 传入系统提示词
         tools=[get_user_location, get_weather_for_location],  # 传入可用工具
         context_schema=Context,  # 传入上下文模式
         response_format=ResponseFormat,  # 传入响应模式
         checkpointer=checkpointer,  # 传入检查点保存器
+        middleware=[dynamic_model_selection],  # 动态选择llm
     )
+    # `thread_id`是给定对话的唯一标识符。
     config = {"configurable": {"thread_id": "1"}}
-
-    print("=== 开始流式输出 ===\n")
-
-    # 使用 stream_mode=["updates", "custom"] 同时获取更新和自定义流式输出
-    for stream_mode, chunk in agent.stream(
-        {"messages": [{"role": "user", "content": "天气如何呢?"}]},
-        stream_mode=["updates", "custom"],
-        config=config,
+    response = agent.invoke(  # 调用智能体
+        {"messages": [{"role": "user", "content": "外面天气怎么样？"}]},  # 用户消息
+        config=config,  # 配置（包含thread_id）
         context=Context(user_id="1"),  # 上下文（包含用户ID）
-    ):
-        print(f"📡 流模式: {stream_mode}")
-
-        if stream_mode == "custom":
-            # 自定义流式输出（来自工具内部的 get_stream_writer）
-            print(f"  🎯 {chunk}")
-        elif stream_mode == "updates":
-            # 更新模式（步骤信息）
-            for step, data in chunk.items():
-                print(f"📍 步骤: {step}")
-
-                # 处理消息内容
-                messages = data.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    content_blocks = getattr(last_message, "content_blocks", None)
-
-                    if content_blocks:
-                        for block in content_blocks:
-                            if block.get("type") == "tool_call":
-                                print(f"  🛠️  调用工具: {block.get('name')}")
-                                print(f"  📝 参数: {block.get('args')}")
-                            elif block.get("type") == "text":
-                                print(f"  💬 内容: {block.get('text')}")
-                    else:
-                        print(f"  📄 消息内容: {last_message.content}")
-
-                print()  # 空行分隔
-
-    print("\n=== 流式输出完成 ===")
+    )
+    print(response["structured_response"])  # 打印结构化响应
+    # 注意，我们可以使用相同的`thread_id`继续对话。
+    response = agent.invoke(
+        {"messages": [{"role": "user", "content": "thank you!"}]}, config=config, context=Context(user_id="1")
+    )
+    print(response["structured_response"])
 
 
 if __name__ == "__main__":
