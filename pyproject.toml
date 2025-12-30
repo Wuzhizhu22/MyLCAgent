@@ -1,7 +1,7 @@
 [project]
-name = "langcahin-test"
-version = "0.1.0"
-description = "Add your description here"
+name = "MyLCAgent"
+version = "0.1.1"
+description = "使用 LangChain 框架构建的简易智能体，支持工具调用和结构化响应"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
