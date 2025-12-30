@@ -1,10 +1,12 @@
 import yaml
+import argparse
 
 from langchain.agents import create_agent
 from langchain.tools import tool, ToolRuntime
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from dataclasses import dataclass
 
@@ -58,18 +60,29 @@ class ResponseFormat:
         return result
 
 
-# 从tools.yaml加载配置
+# 从llm.yaml加载配置
 def load_config(config_path):
     """从YAML文件加载配置"""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
 
-tool_config = load_config("./tools.yaml")  # 加载配置
+tool_config = load_config("./llm.yaml")  # 加载配置
 model = ChatOpenAI(**tool_config["llm"])  # 创建模型实例
 
 
 def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="天气查询智能体")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["stream", "invoke"],
+        default="invoke",
+        help="运行模式：stream（流式输出）或 invoke（一次性输出）",
+    )
+    args = parser.parse_args()
+
     checkpointer = InMemorySaver()  # 创建内存检查点保存器
     agent = create_agent(  # 创建智能体
         model=model,  # 传入模型
@@ -81,44 +94,77 @@ def main():
     )
     config = {"configurable": {"thread_id": "1"}}
 
-    print("=== 开始流式输出 ===\n")
+    # 创建 usage metadata callback handler
+    callback = UsageMetadataCallbackHandler()
 
-    # 使用 stream_mode=["updates", "custom"] 同时获取更新和自定义流式输出
-    for stream_mode, chunk in agent.stream(
-        {"messages": [{"role": "user", "content": "天气如何呢?"}]},
-        stream_mode=["updates", "custom"],
-        config=config,
-        context=Context(user_id="1"),  # 上下文（包含用户ID）
-    ):
-        print(f"📡 流模式: {stream_mode}")
+    # 将 callback 添加到 config 中
+    config_with_callback = {"configurable": {"thread_id": "1"}, "callbacks": [callback]}
 
-        if stream_mode == "custom":
-            # 自定义流式输出（来自工具内部的 get_stream_writer）
-            print(f"  🎯 {chunk}")
-        elif stream_mode == "updates":
-            # 更新模式（步骤信息）
-            for step, data in chunk.items():
-                print(f"📍 步骤: {step}")
+    if args.mode == "stream":
+        # 流式输出模式
+        print("=== 开始流式输出 ===\n")
 
-                # 处理消息内容
-                messages = data.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    content_blocks = getattr(last_message, "content_blocks", None)
+        # 使用 stream_mode=["updates", "custom"] 同时获取更新和自定义流式输出
+        for stream_mode, chunk in agent.stream(
+            {"messages": [{"role": "user", "content": "天气如何呢?"}]},
+            stream_mode=["updates", "custom"],
+            config=config_with_callback,
+            context=Context(user_id="1"),  # 上下文（包含用户ID）
+        ):
+            print(f"📡 流模式: {stream_mode}")
 
-                    if content_blocks:
-                        for block in content_blocks:
-                            if block.get("type") == "tool_call":
-                                print(f"  🛠️  调用工具: {block.get('name')}")
-                                print(f"  📝 参数: {block.get('args')}")
-                            elif block.get("type") == "text":
-                                print(f"  💬 内容: {block.get('text')}")
-                    else:
-                        print(f"  📄 消息内容: {last_message.content}")
+            if stream_mode == "custom":
+                # 自定义流式输出（来自工具内部的 get_stream_writer）
+                print(f"  🎯 {chunk}")
+            elif stream_mode == "updates":
+                # 更新模式（步骤信息）
+                for step, data in chunk.items():
+                    print(f"📍 步骤: {step}")
 
-                print()  # 空行分隔
+                    # 处理消息内容
+                    messages = data.get("messages", [])
+                    if messages:
+                        last_message = messages[-1]
+                        content_blocks = getattr(last_message, "content_blocks", None)
 
-    print("\n=== 流式输出完成 ===")
+                        if content_blocks:
+                            for block in content_blocks:
+                                if block.get("type") == "tool_call":
+                                    print(f"  🛠️  调用工具: {block.get('name')}")
+                                    print(f"  📝 参数: {block.get('args')}")
+                                elif block.get("type") == "text":
+                                    print(f"  💬 内容: {block.get('text')}")
+                        else:
+                            print(f"  📄 消息内容: {last_message.content}")
+
+                    print()  # 空行分隔
+
+        print("\n=== 流式输出完成 ===")
+    else:
+        # invoke 模式
+        print("=== 使用 invoke 模式 ===\n")
+
+        # 使用 invoke 方法
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": "天气如何呢?"}]},
+            config=config_with_callback,
+            context=Context(user_id="1"),  # 上下文（包含用户ID）
+        )
+
+        print(result["structured_response"])
+        print("\n=== invoke 完成 ===")
+
+    # 打印 Token 使用统计
+    print("\n📊 Token 使用统计:")
+    if callback.usage_metadata:
+        for model_name, metadata in callback.usage_metadata.items():
+            print(f"  模型: {model_name}")
+            print(f"    输入 Tokens: {metadata.get('input_tokens', 0)}")
+            print(f"    输出 Tokens: {metadata.get('output_tokens', 0)}")
+            print(f"    总计 Tokens: {metadata.get('total_tokens', 0)}")
+    else:
+        print("  未获取到 token 使用统计")
+    # print(f"  完整 metadata: {callback.usage_metadata}")
 
 
 if __name__ == "__main__":

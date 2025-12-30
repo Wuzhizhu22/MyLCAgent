@@ -20,3 +20,13 @@
 ### Added
 
 - 新增了流式传输的样例
+
+## [0.1.2] - 2025-12-31
+
+### Added
+
+- 新增了可选择运行模式（stream/invoke）的样例
+
+### Fixed
+
+- 把 tools.yaml 重命名为 llm.yaml，用于配置 llm 模型参数

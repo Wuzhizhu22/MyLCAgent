@@ -50,14 +50,14 @@ class ResponseFormat:
         return result
 
 
-# 从tools.yaml加载配置
+# 从llm.yaml加载配置
 def load_config(config_path):
     """从YAML文件加载配置"""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
 
-tool_config = load_config("./tools.yaml")  # 加载配置
+tool_config = load_config("./llm.yaml")  # 加载配置
 model = ChatOpenAI(**tool_config["llm"])  # 创建模型实例
 
 

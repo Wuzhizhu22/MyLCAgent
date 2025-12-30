@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 
 temp
-tools.yaml
+test.py
 # Virtual environments
 .venv
 

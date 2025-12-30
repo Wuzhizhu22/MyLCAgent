@@ -26,7 +26,7 @@
 
 ## 配置说明
 
-修改 `tools.yaml` 文件配置 API 密钥和模型参数：
+修改 `llm.yaml` 文件配置 API 密钥和模型参数：
 
 ```yaml
 llm:

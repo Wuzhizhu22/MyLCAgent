@@ -1,0 +1,10 @@
+# Configuration file for LLM API
+llm:
+  model: gpt-4.1
+  api_key: YOUR_API_KEY
+  base_url: YOUR_BASE_URL
+
+advance_llm:
+  model: gpt-5
+  api_key: YOUR_API_KEY
+  base_url: YOUR_BASE_URL
